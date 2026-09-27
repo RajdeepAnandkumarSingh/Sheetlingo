@@ -1,0 +1,31 @@
+Employee_ID,Name,Department,Age,Salary,Performance_Score,Status
+E101,John Doe,Engineering,29,75000,4.2,Active
+E102,Jane Smith,Enginering,31,82000,4.5,Active
+E103,Bob Johnson,Marketing,45,68000,3.8,Pending
+E104,Alice Brown,Marketng,38,71000,4.0,Active
+E105,Charlie White,Sales,26,52000,3.5,Active
+E106,Eva Green,Sles,27,54000,3.7,Pending
+E107,Frank Black,Engineering,,950000,4.9,Active
+E108,Grace Lee,HR,34,61000,3.9,Active
+E109,Henry Wilson,Human Resources,35,63000,4.1,Active
+E110,Ivy Clark,Engineering,42,110000,4.8,Active
+E111,Jack Ryan,Marketing,28,58000,3.6,Terminated
+E112,Karen Adams,Sales,51,92000,4.6,Active
+E113,Leo Miller,Engineering,23,48000,,Active
+E114,Mia Davis,Finance,39,89000,4.3,Active
+E115,Noah Martinez,Finace,40,91000,4.4,Pending
+E116,Oliver Taylor,Engineering,33,85000,4.3,Active
+E117,Patricia Thomas,Enginering,29,77000,4.1,Active
+E118,Quinn Jackson,Marketing,47,73000,3.9,Active
+E119,Rachel White,Marketng,36,69000,4.0,Pending
+E120,Samuel Harris,Sales,30,56000,3.6,Active
+E121,Tara Martin,Sles,28,58000,3.8,Active
+E122,Ulysses Clark,Engineering,44,115000,4.7,Active
+E123,Victoria Lewis,HR,32,64000,4.0,Active
+E124,William Robinson,Human Resources,37,66000,4.2,Pending
+E125,Xavier Walker,Finance,41,94000,4.5,Active
+E126,Yara Young,Finace,38,92000,4.4,Active
+E127,Zack Allen,Engineering,25,51000,3.7,Active
+E128,Abigail King,Sales,53,98000,4.8,Active
+E129,Brian Wright,Marketing,,70000,3.9,Pending
+E130,Chloe Scott,Engineering,30,83000,4.4,Active
