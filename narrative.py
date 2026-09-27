@@ -1,4 +1,5 @@
 import re
+import hashlib
 import pandas as pd
 import numpy as np
 from cleaner import generate_data_profile
@@ -105,7 +106,9 @@ def generate_narrative_summary(df: pd.DataFrame) -> dict:
     # 5. Correlation Summary
     if len(num_df.columns) >= 2:
         corr_matrix = num_df.corr().abs()
-        np.fill_diagonal(corr_matrix.values, 0)
+        corr_values = corr_matrix.to_numpy(copy=True)
+        np.fill_diagonal(corr_values, 0)
+        corr_matrix = pd.DataFrame(corr_values, index=corr_matrix.index, columns=corr_matrix.columns)
         max_corr = corr_matrix.unstack().sort_values(ascending=False)
         if not max_corr.empty:
             pair, high_val = max_corr.index[0], round(max_corr.iloc[0], 2)
@@ -121,3 +124,7 @@ def generate_narrative_summary(df: pd.DataFrame) -> dict:
         "key_insights": insights,
         "full_narrative": narrative_text
     }
+
+
+with open(__file__, "rb") as _source_file:
+    SHEETLINGO_SOURCE_DIGEST = hashlib.sha256(_source_file.read()).hexdigest()

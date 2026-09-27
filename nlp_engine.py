@@ -464,6 +464,25 @@ class AdvancedNLPEngine:
                 ]
                 if len(family_candidates) == 1:
                     return family_candidates[0]
+
+            # Match small header variations such as "sleep duration hour"
+            # against "Sleep_Duration_Hours". Only accept a strong, clearly
+            # better candidate so a vague description does not pick a column
+            # arbitrarily.
+            query_phrase = " ".join(re.findall(r"[a-z0-9]+", normalized_text))
+            fuzzy_matches = []
+            if query_phrase:
+                for column in candidates:
+                    column_phrase = " ".join(
+                        re.findall(r"[a-z0-9]+", re.sub(r"[_\-]+", " ", str(column).lower()))
+                    )
+                    score = fuzz.token_sort_ratio(query_phrase, column_phrase)
+                    fuzzy_matches.append((score, column))
+            fuzzy_matches.sort(key=lambda item: item[0], reverse=True)
+            if fuzzy_matches and fuzzy_matches[0][0] >= 88:
+                runner_up_score = fuzzy_matches[1][0] if len(fuzzy_matches) > 1 else 0
+                if fuzzy_matches[0][0] - runner_up_score >= 6:
+                    return fuzzy_matches[0][1]
             return None
 
         numeric_columns = infer_numeric_columns(dataframe) if dataframe is not None else []

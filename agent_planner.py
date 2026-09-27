@@ -30,7 +30,10 @@ class AgentPlanner:
         step_counter = 1
 
         for part in raw_parts:
-            part_str = part.strip()
+            # Splitting on "after that" can leave a dangling "and" at the
+            # end of the previous step ("... based on Department and").
+            part_str = re.sub(r"(?:\s+\b(?:and|then)\b)+\s*$", "", part.strip(), flags=re.IGNORECASE)
+            part_str = part_str.strip(" \t\r\n,;.")
             if len(part_str) >= 3:
                 clean_steps.append({
                     "step": step_counter,

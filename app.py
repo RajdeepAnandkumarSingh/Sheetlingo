@@ -12,28 +12,67 @@ import streamlit as st
 from cleaner import clean_and_profile_dataframe, detect_anomalies, impute_missing_values, encode_categorical_features, generate_data_profile
 import nlp_engine as nlp_engine_module
 import executor as executor_module
+import narrative as narrative_module
+import version_manager as version_manager_module
 
 
 def refresh_changed_query_modules():
     """Reload changed parser/executor files on the next Streamlit rerun."""
     reloaded = False
-    for module in (nlp_engine_module, executor_module):
+    narrative_reloaded = False
+    version_manager_reloaded = False
+    for module in (nlp_engine_module, executor_module, narrative_module, version_manager_module):
         with open(module.__file__, "rb") as source_file:
             current_digest = hashlib.sha256(source_file.read()).hexdigest()
         if getattr(module, "SHEETLINGO_SOURCE_DIGEST", None) != current_digest:
             importlib.reload(module)
-            reloaded = True
+            if module in (nlp_engine_module, executor_module):
+                reloaded = True
+            elif module is narrative_module:
+                narrative_reloaded = True
+            elif module is version_manager_module:
+                version_manager_reloaded = True
+    if narrative_reloaded and not reloaded:
+        # executor.py imports this summary function directly, so refresh that
+        # reference as well when the narrative implementation changes.
+        importlib.reload(executor_module)
+        reloaded = True
     if reloaded and "benchmark" in sys.modules:
         importlib.reload(sys.modules["benchmark"])
-    return reloaded
+    return reloaded, version_manager_reloaded
 
 
-query_modules_reloaded = refresh_changed_query_modules()
+def series_values_match(actual, expected):
+    """Compare an existing derived column with a newly calculated result."""
+    actual = pd.Series(actual).reset_index(drop=True)
+    expected = pd.Series(expected).reset_index(drop=True)
+    if len(actual) != len(expected):
+        return False
+
+    actual_numeric = pd.to_numeric(actual, errors="coerce")
+    expected_numeric = pd.to_numeric(expected, errors="coerce")
+    actual_is_numeric = actual.isna() | actual_numeric.notna()
+    expected_is_numeric = expected.isna() | expected_numeric.notna()
+    if actual_is_numeric.all() and expected_is_numeric.all():
+        return bool(np.allclose(
+            actual_numeric.to_numpy(dtype=float),
+            expected_numeric.to_numpy(dtype=float),
+            rtol=1e-9,
+            atol=0.005,
+            equal_nan=True,
+        ))
+
+    return actual.astype("string").fillna("<missing>").equals(
+        expected.astype("string").fillna("<missing>")
+    )
+
+
+query_modules_reloaded, version_manager_reloaded = refresh_changed_query_modules()
 AdvancedNLPEngine = nlp_engine_module.AdvancedNLPEngine
 execute_nlp_query = executor_module.execute_nlp_query
-from narrative import generate_narrative_summary
+generate_narrative_summary = narrative_module.generate_narrative_summary
+VersionManager = version_manager_module.VersionManager
 from benchmark import run_benchmark_suite
-from version_manager import VersionManager
 from duckdb_engine import FastDuckDBEngine
 from agent_planner import AgentPlanner
 
@@ -461,6 +500,8 @@ if raw_df is not None:
         st.session_state.current_filename = uploaded_filename
         st.session_state.pop("latest_exec", None)
         st.session_state.pop("nl_query_input", None)
+    elif version_manager_reloaded:
+        st.session_state.version_manager.__class__ = VersionManager
 
     vm: VersionManager = st.session_state.version_manager
 
@@ -524,34 +565,102 @@ if raw_df is not None:
 
         # Execute processing steps
         step_df = active_df.copy()
-        last_exec_res = None
+        step_results = []
+        exec_res = None
 
         for step_info in steps:
             sub_query = step_info["query"]
             intent = nlp_engine.predict_intent(sub_query)
             entities = nlp_engine.extract_entities(sub_query, step_df.columns.tolist(), dataframe=step_df)
-            exec_res = execute_nlp_query(step_df, intent, entities)
-            step_df = exec_res["transformed_df"]
-            last_exec_res = exec_res
+            existing_column = entities.get("new_column_name") if intent == "ADD_COL" else None
+            if existing_column in step_df.columns and not entities.get("operation_clarification"):
+                # Re-running a compound request should not fail just because an
+                # earlier step already created the same column. Reuse it only
+                # when its values match the requested calculation exactly.
+                without_existing = step_df.drop(columns=[existing_column])
+                recalculated = execute_nlp_query(without_existing, intent, entities)
+                if (
+                    not recalculated.get("needs_clarification")
+                    and existing_column in recalculated["transformed_df"].columns
+                    and series_values_match(
+                        step_df[existing_column],
+                        recalculated["transformed_df"][existing_column],
+                    )
+                ):
+                    step_res = dict(recalculated)
+                    step_res["transformed_df"] = step_df.copy()
+                    step_res["status_message"] = (
+                        f"The '{existing_column}' column is already present with the requested values; kept it as-is."
+                    )
+                    step_res["code_snippet"] = (
+                        f"# Verified existing column {existing_column!r}; no overwrite was needed."
+                    )
+                else:
+                    step_res = execute_nlp_query(step_df, intent, entities)
+            else:
+                step_res = execute_nlp_query(step_df, intent, entities)
+            step_results.append({
+                "step": step_info["step"],
+                "query": sub_query,
+                "intent": intent,
+                "entities": entities,
+                "res": step_res,
+            })
+            exec_res = step_res
+
+            # Stop the chain if any operation needs clarification. Do not
+            # queue earlier partial results as an Apply change draft.
+            if step_res.get("needs_clarification"):
+                clarification = step_res.get("clarification_message") or step_res["status_message"]
+                exec_res = dict(step_res)
+                exec_res["transformed_df"] = active_df.copy()
+                exec_res["status_message"] = (
+                    f"Step {step_info['step']} needs clarification. No changes were queued. {clarification}"
+                )
+                exec_res["clarification_message"] = clarification
+                break
+
+            step_df = step_res["transformed_df"]
 
         latency = round((time.time() - start_t) * 1000, 2)
-        exec_res = last_exec_res
+
+        # Retain each successful operation in the final result so the user can
+        # see that the dataset is the cumulative output of the whole request.
+        if exec_res is not None and not exec_res.get("needs_clarification"):
+            exec_res = dict(exec_res)
+            exec_res["transformed_df"] = step_df
+            if len(step_results) > 1:
+                messages = [item["res"]["status_message"].strip().rstrip(".") for item in step_results]
+                if messages:
+                    messages[0] = messages[0][:1].upper() + messages[0][1:]
+                    messages[1:] = [message[:1].lower() + message[1:] for message in messages[1:]]
+                exec_res["status_message"] = (
+                    f"Completed all {len(step_results)} steps: " + "; then ".join(messages) + "."
+                )
+                exec_res["code_snippet"] = "\n\n".join(
+                    f"# Step {item['step']}: {item['query']}\n{item['res']['code_snippet']}"
+                    for item in step_results
+                )
         
-        # Save last execution result in session state for tab view
+        # Save the cumulative result and per-step details for the tab view.
         st.session_state["latest_exec"] = {
             "res": exec_res,
-            "entities": entities,
+            "entities": step_results[-1]["entities"] if step_results else {},
             "steps": steps,
+            "step_results": step_results,
             "latency": latency,
             "query": user_query
         }
 
         # If operation mutates data, push to uncommitted draft for Safety Preview Diff
         if exec_res["intent"] in ["UPDATE_VALUE", "DROP_NULLS", "DROP_COL", "RENAME_COL", "IMPUTE_KNN", "ADD_COL", "ADD_ROW"] and not exec_res.get("needs_clarification"):
+            draft_intent = exec_res["intent"]
+            if len(step_results) > 1 and len({item["intent"] for item in step_results}) > 1:
+                draft_intent = "MULTI_STEP"
             vm.create_draft(
-                modified_df=exec_res["transformed_df"],
+                modified_df=step_df,
                 message=exec_res["status_message"],
-                intent=exec_res["intent"],
+                intent=draft_intent,
                 code_trace=exec_res["code_snippet"]
             )
             st.rerun()
@@ -573,11 +682,20 @@ if raw_df is not None:
     if vm.draft_df is not None:
         st.warning("Review these proposed changes")
         st.info(f"Requested change: {vm.pending_message}")
+        latest_draft_request = st.session_state.get("latest_exec", {})
+        if (
+            latest_draft_request.get("query") == st.session_state.get("nl_query_input", "")
+            and len(latest_draft_request.get("steps", [])) > 1
+        ):
+            st.caption(
+                f"All {len(latest_draft_request['steps'])} steps are included in this preview. "
+                "Apply change saves them together."
+            )
         d_df, d_sum = vm.create_draft(vm.draft_df, vm.pending_message, vm.pending_intent, vm.pending_trace)
         
         diff1, diff2, diff3, diff4, diff5 = st.columns(5)
         with diff1:
-            st.metric("Cells changed", d_sum["modified_cells"])
+            st.metric("Existing cells updated", d_sum["modified_cells"])
         with diff2:
             st.metric("Rows Added", d_sum["rows_added"])
         with diff3:
@@ -585,16 +703,21 @@ if raw_df is not None:
         with diff4:
             st.metric("Rows after change", d_sum["total_rows_after"])
         with diff5:
-            st.metric("Columns added", d_sum.get("columns_added", 0))
+            active_columns = set(vm.get_active_df().columns)
+            st.metric("Columns added", len(set(d_df.columns) - active_columns))
 
         st.markdown("#### Preview the updated data")
         render_theme_dataframe(d_df, height=240, is_dark=is_dark_selected)
         
         btn_c1, btn_c2 = st.columns([1, 1])
+        compound_draft = (
+            latest_draft_request.get("query") == st.session_state.get("nl_query_input", "")
+            and len(latest_draft_request.get("steps", [])) > 1
+        )
         with btn_c1:
-            if st.button("Apply change", type="primary", use_container_width=True):
+            if st.button("Apply all changes" if compound_draft else "Apply change", type="primary", use_container_width=True):
                 vm.confirm_draft()
-                st.success("Change applied and saved to history.")
+                st.success("All requested changes applied and saved to history." if compound_draft else "Change applied and saved to history.")
                 st.rerun()
         with btn_c2:
             if st.button("Discard change", use_container_width=True):
@@ -621,6 +744,7 @@ if raw_df is not None:
             exec_res = latest["res"]
             entities = latest["entities"]
             steps = latest["steps"]
+            step_results = latest.get("step_results", [])
             latency = latest["latency"]
 
             if len(steps) > 1:
@@ -629,21 +753,30 @@ if raw_df is not None:
                     st.write(f"• **Step {s['step']}:** `{s['query']}`")
 
             if exec_res.get("needs_clarification"):
-                st.warning(exec_res.get("clarification_message") or exec_res["status_message"])
+                st.warning(exec_res["status_message"])
             else:
                 st.success(exec_res["status_message"])
 
             with st.expander("How SheetLingo interpreted this request", expanded=False):
-                tc1, tc2, tc3 = st.columns(3)
-                with tc1:
-                    st.write(f"**Operation:** {exec_res['intent'].replace('_', ' ').title()}")
-                    st.write(f"**Processing time:** {latency} ms")
-                with tc2:
-                    st.write(f"**Columns:** {entities['columns']}")
-                    st.write(f"**Values:** {entities['numbers'] or entities['literal_values']}")
-                with tc3:
-                    st.write("**Technical details:**")
-                    st.code(exec_res['code_snippet'], language='python')
+                if len(step_results) > 1:
+                    for item in step_results:
+                        st.markdown(f"**Step {item['step']} · {item['intent'].replace('_', ' ').title()}**")
+                        st.write(item["res"]["status_message"])
+                        st.caption(f"Columns: {item['entities'].get('columns', [])}")
+                        if item["res"].get("code_snippet"):
+                            st.code(item["res"]["code_snippet"], language="python")
+                    st.caption(f"Total processing time: {latency} ms")
+                else:
+                    tc1, tc2, tc3 = st.columns(3)
+                    with tc1:
+                        st.write(f"**Operation:** {exec_res['intent'].replace('_', ' ').title()}")
+                        st.write(f"**Processing time:** {latency} ms")
+                    with tc2:
+                        st.write(f"**Columns:** {entities['columns']}")
+                        st.write(f"**Values:** {entities['numbers'] or entities['literal_values']}")
+                    with tc3:
+                        st.write("**Technical details:**")
+                        st.code(exec_res['code_snippet'], language='python')
 
             if not exec_res.get("needs_clarification") and "Business Analytics" in mode:
                 if exec_res["result_metric"]:

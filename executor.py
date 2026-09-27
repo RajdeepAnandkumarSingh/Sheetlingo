@@ -450,8 +450,8 @@ def execute_nlp_query(df: pd.DataFrame, intent: str, entities: dict) -> dict:
             values = numeric_data.groupby(df[group_col], dropna=False)[source_col].transform(
                 lambda series: aggregate_series(series, aggregation)
             )
-            transformed_df[new_col_name] = values
-            code_snippet = f"transformed_df[{new_col_name!r}] = numeric_data.groupby(df[{group_col!r}])[{source_col!r}].transform({aggregation!r})"
+            transformed_df[new_col_name] = values.round(2)
+            code_snippet = f"transformed_df[{new_col_name!r}] = numeric_data.groupby(df[{group_col!r}])[{source_col!r}].transform({aggregation!r}).round(2)"
             status_msg = f"Added '{new_col_name}' with each row's {aggregation.upper()} of '{source_col}' within its '{group_col}' group."
         elif constant is not None:
             numeric_constant = pd.to_numeric(str(constant).replace(",", "").replace("$", "").strip(), errors="coerce")

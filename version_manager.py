@@ -1,4 +1,5 @@
 import time
+import hashlib
 import pandas as pd
 from typing import Dict, List, Tuple
 
@@ -67,7 +68,8 @@ class VersionManager:
             try:
                 c_sub = current_df.iloc[:min_rows][common_cols]
                 m_sub = modified_df.iloc[:min_rows][common_cols]
-                diff_mask = (c_sub.astype(str) != m_sub.astype(str))
+                diff_mask = c_sub.ne(m_sub).fillna(True)
+                diff_mask &= ~(c_sub.isna() & m_sub.isna())
                 modified_cells = int(diff_mask.sum().sum())
             except Exception:
                 modified_cells = len(modified_df)
@@ -116,3 +118,7 @@ class VersionManager:
 
     def get_active_commit(self) -> DatasetCommit:
         return self.history[self.current_index]
+
+
+with open(__file__, "rb") as _source_file:
+    SHEETLINGO_SOURCE_DIGEST = hashlib.sha256(_source_file.read()).hexdigest()
